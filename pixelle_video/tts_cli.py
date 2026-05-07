@@ -17,12 +17,14 @@ Usage:
     pvideo-tts "你好世界" --local
     pvideo-tts "Hello" --comfyui --workflow tts_edge.json
     echo "text" | pvideo-tts --local
+    pvideo-tts --task-id mytask --local "你好"
 """
 
 import argparse
 import asyncio
 import json
 import sys
+from pathlib import Path
 
 from pixelle_video.service import PixelleVideoCore
 from pixelle_video.services.tts_service import TTSService
@@ -49,9 +51,34 @@ def main():
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
     parser.add_argument("--list-voices", action="store_true",
                         help="List available voices and exit")
+    parser.add_argument("--task-id", help="Task ID for grouping outputs under output/<task_id>/")
 
     args = parser.parse_args()
     sys.exit(cmd_tts(args))
+
+
+def _get_task_dir(task_id: str) -> str:
+    """Ensure output/{task_id}/ exists and return its path."""
+    task_dir = Path("output") / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    return str(task_dir)
+
+
+def _next_index(task_dir: str, prefix: str) -> int:
+    """Find next auto-increment index for files matching prefix in task_dir."""
+    existing = sorted(Path(task_dir).glob(f"{prefix}_*"))
+    if not existing:
+        return 0
+    indices = []
+    for p in existing:
+        try:
+            # Extract number from tts_0.mp3, image_3.png, etc.
+            stem = p.stem  # tts_0
+            idx = int(stem.split("_")[-1])
+            indices.append(idx)
+        except (ValueError, IndexError):
+            pass
+    return max(indices) + 1 if indices else 0
 
 
 def cmd_tts(args) -> int:
@@ -70,6 +97,13 @@ def cmd_tts(args) -> int:
             print("Error: No text provided. Usage: pvideo-tts <text>", file=sys.stderr)
             return 2
 
+    # Determine output path
+    output_path = None
+    if args.task_id:
+        task_dir = _get_task_dir(args.task_id)
+        idx = _next_index(task_dir, "tts")
+        output_path = str(Path(task_dir) / f"tts_{idx}.mp3")
+
     core = PixelleVideoCore()
     service = TTSService(core.config, core=core)
 
@@ -82,24 +116,21 @@ def cmd_tts(args) -> int:
             workflow=args.workflow,
             comfyui_url=args.comfyui_url,
             runninghub_api_key=args.runninghub_api_key,
+            output_path=output_path,
         ))
     except Exception as e:
         if args.json_output:
-            output = json.dumps({
-                "ok": False,
-                "error": str(e),
-            }, ensure_ascii=False)
+            output = json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
             print(output)
         else:
             print(f"Error: {e}", file=sys.stderr)
         return 1
 
     if args.json_output:
-        output = json.dumps({
-            "ok": True,
-            "path": result,
-        }, ensure_ascii=False)
-        print(output)
+        output = {"ok": True, "path": result}
+        if args.task_id:
+            output["task_id"] = args.task_id
+        print(json.dumps(output, ensure_ascii=False))
     else:
         print(result)
 

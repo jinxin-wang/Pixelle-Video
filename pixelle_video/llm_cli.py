@@ -17,43 +17,23 @@ Usage:
     pvideo-llm "Explain atomic habits"
     echo "Explain..." | pvideo-llm
     pvideo-llm --preset qwen "Hello"
+    pvideo-llm --task-id mytask "Hello"
 """
 
 import argparse
 import asyncio
 import json
-import os
 import sys
-
-# loguru emits logs at import time because pixelle_video.__init__ eagerly
-# loads ConfigManager. Suppress stderr during imports, restore afterwards.
-_stderr_fd = sys.stderr.fileno()
-_stderr_backup = os.dup(_stderr_fd)
-_devnull = os.open(os.devnull, os.O_WRONLY)
-os.dup2(_devnull, _stderr_fd)
-os.close(_devnull)
+from pathlib import Path
 
 from loguru import logger
 
 from pixelle_video.services.llm_service import LLMService
 from pixelle_video.llm_presets import get_preset_names, get_preset
 
-# Restore stderr
-os.dup2(_stderr_backup, _stderr_fd)
-os.close(_stderr_backup)
-
-
-def _reconfigure_stdout():
-    """Reconfigure stdout for UTF-8 to handle emoji and non-ASCII chars on Windows."""
-    try:
-        sys.stdout.reconfigure(encoding='utf-8')
-    except Exception:
-        pass
-
 
 def main():
     """CLI entry point for LLM text generation."""
-    _reconfigure_stdout()
     parser = argparse.ArgumentParser(
         prog="pvideo-llm",
         description="Generate text using LLM",
@@ -71,6 +51,7 @@ def main():
     parser.add_argument("--list-presets", action="store_true",
                         help="List available LLM presets and exit")
     parser.add_argument("--preset", help="Use a preset provider (qwen/openai/claude/deepseek/ollama/moonshot)")
+    parser.add_argument("--task-id", help="Task ID for grouping outputs under output/<task_id>/")
 
     args = parser.parse_args()
 
@@ -79,6 +60,13 @@ def main():
         logger.add(sys.stderr, level="DEBUG", colorize=True)
 
     sys.exit(cmd_llm(args))
+
+
+def _get_task_dir(task_id: str) -> str:
+    """Ensure output/{task_id}/ exists and return its path."""
+    task_dir = Path("output") / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    return str(task_dir)
 
 
 def cmd_llm(args) -> int:
@@ -143,14 +131,23 @@ def cmd_llm(args) -> int:
             print(f"Error: {e}", file=sys.stderr)
         return 1
 
+    # Save to task directory if task_id is provided
+    if args.task_id:
+        task_dir = _get_task_dir(args.task_id)
+        narrations_file = Path(task_dir) / "narrations.json"
+        data = {"prompt": prompt, "text": result, "model": model or service.active}
+        narrations_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
     # Output result
     if args.json_output:
-        output = json.dumps({
+        output = {
             "ok": True,
             "text": result,
             "model": model or service.active,
-        }, ensure_ascii=False)
-        print(output)
+        }
+        if args.task_id:
+            output["task_id"] = args.task_id
+        print(json.dumps(output, ensure_ascii=False))
     else:
         print(result)
 
